@@ -1,3 +1,13 @@
+# Self-contained CI for browsercore-proxy.
+#
+# Publishes via npm OIDC trusted publishing from THIS repo's own workflow
+# (registration: jverneuer/browsercore-proxy, workflow ci.yml, environment CI)
+# rather than through browsercore-dev's reusable workflow. The 2026-11-16
+# proxy 0.1.1 publish E404'd through the reusable indirection while the
+# identical self-contained shape validated on @browsercore/dev the same day;
+# inlining removes the ambiguity. Steps mirror reusable-ci.yml verbatim.
+name: CI
+
 on:
   push:
     branches: [main]
@@ -8,12 +18,182 @@ permissions:
   contents: read
 
 jobs:
-  build-and-publish:
-    uses: jverneuer/browsercore-dev/.github/workflows/reusable-ci.yml@main
-    with:
-      node-version: '26'
-      deploy-pages: true
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+
+      - run: npm install
+
+      - run: npm run typecheck
+      - run: npm run lint -- --deny-warnings
+      - run: npm test -- --coverage
+
+      - name: Enforce coverage thresholds
+        env:
+          MINIMUM: "93"
+        run: |
+          node -e "
+          const t = require('./coverage/coverage-summary.json').total;
+          const s = t.statements.pct, b = t.branches.pct, f = t.functions.pct, l = t.lines.pct;
+          const min = parseFloat(process.env.MINIMUM);
+          const failed = [['statements',s],['branches',b],['functions',f],['lines',l]].filter(([,p])=>p<min);
+          if (failed.length) {
+            console.error('Coverage below '+min+'% threshold:');
+            for (const [k,p] of failed) console.error('  '+k+' '+p+'% < '+min+'%');
+            process.exit(1);
+          }
+          console.log('Coverage OK — statements '+s+'%, branches '+b+'%, functions '+f+'%, lines '+l+'% >= '+min+'%');
+          "
+
+      - name: Generate COVERAGE.md + badge
+        run: |
+          npx coverage-md 2>/dev/null || true
+          node -e "
+          const fs = require('fs');
+          const t = JSON.parse(fs.readFileSync('coverage/coverage-summary.json','utf8')).total;
+          const pct = t.statements.pct;
+          const color = pct >= 90 ? 'brightgreen' : pct >= 75 ? 'green' : pct >= 50 ? 'yellow' : 'red';
+          const badge = { schemaVersion: 1, label: 'coverage', message: pct+'%', color, namedLogo: 'vitest' };
+          fs.mkdirSync('.github', { recursive: true });
+          fs.writeFileSync('.github/coverage-badge.json', JSON.stringify(badge));
+          "
+
+      - run: npm run build
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: |
+            COVERAGE.md
+            .github/coverage-badge.json
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    environment: CI
     permissions:
       contents: write
       id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+
+      - run: npm install
+
+      # Publishes via npm OIDC trusted publishing (no token) — see header.
+      # Do NOT re-add NODE_AUTH_TOKEN: a present token overrides OIDC auth.
+      - name: Publish to npm (skips if version already exists)
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          NAME=$(node -p "require('./package.json').name")
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "$NAME@$VERSION already on npm — skipping publish"
+            exit 0
+          fi
+          npm publish --access public --provenance
+
+      - name: Create git tag and GitHub Release with changelog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          NAME=$(node -p "require('./package.json').name")
+          TAG="v$VERSION"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "tag $TAG already exists — skipping release"
+            exit 0
+          fi
+
+          PREV_TAG=$(git tag --sort=-v:refname | head -1)
+
+          CHANGELOG=$(node -e "
+            const { execSync } = require('child_process');
+            const prevTag = process.argv[1] || '';
+            const range = prevTag ? prevTag + '..HEAD' : 'HEAD';
+            const log = execSync('git log ' + range + ' --pretty=format:%s --no-merges', { encoding: 'utf8' });
+            const lines = log.trim().split('\n').filter(Boolean);
+            const cats = [['feat','Features'], ['fix','Bug Fixes'], ['refactor','Refactoring'], ['perf','Performance'], ['docs','Documentation'], ['test','Tests'], ['ci','CI'], ['chore','Chore']];
+            const esc = (s) => s.replace(/@(browsercore|main|github)/g, '@\u200B\$1');
+            const buckets = {};
+            const other = [];
+            for (const line of lines) {
+              const m = line.match(/^(feat|fix|refactor|perf|docs|test|ci|chore)(?:\(([^)]+)\))?:\s*(.+)/);
+              if (m) {
+                const cat = cats.find(c => c[0] === m[1]);
+                const key = cat[1];
+                if (!buckets[key]) buckets[key] = [];
+                const text = m[2] ? '**' + esc(m[2]) + '**: ' + esc(m[3]) : esc(m[3]);
+                buckets[key].push('- ' + text);
+              } else {
+                other.push('- ' + esc(line));
+              }
+            }
+            let out = '';
+            for (const [, label] of cats) {
+              if (buckets[label]) out += '### ' + label + '\n\n' + buckets[label].join('\n') + '\n\n';
+            }
+            if (other.length) out += '### Other Changes\n\n' + other.join('\n') + '\n\n';
+            process.stdout.write(out.trim() || 'Release published.');
+          " "$PREV_TAG")
+
+          TITLE_DESC=$(git log "${PREV_TAG:+$PREV_TAG..}HEAD" --pretty=format:"%s" --no-merges --grep="^feat" --grep="^fix" | head -1 | sed 's/^[^:]*://' | sed 's/^[[:space:]]*//')
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+          SAFE_NAME=$(echo "$NAME" | sed 's/@/\\@/g')
+          gh release create "$TAG" \
+            --title "${TAG}${TITLE_DESC:+ — ${TITLE_DESC}}" \
+            --notes "$(printf '**%s@%s**\n\n%s' "$SAFE_NAME" "$VERSION" "$CHANGELOG")"
+
+  deploy-pages:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
       pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: coverage-report
+          path: _site/
+      - run: mv _site/.github/coverage-badge.json _site/badge.json && rm -rf _site/.github
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site/
+      - id: deployment
+        uses: actions/deploy-pages@v5
