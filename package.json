@@ -1,6 +1,6 @@
 {
     "name": "@browsercore/proxy",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "Runtime-agnostic SOCKS5 and HTTP CONNECT proxy tunnels for the @browsercore stack. All I/O injected — handshakes run over any duplex Transport.",
     "repository": {
         "type": "git",
