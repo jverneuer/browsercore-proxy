@@ -132,6 +132,11 @@ Application
 - **GSSAPI auth (method 0x01) is not offered** — methods are `0x00` and `0x02` (when credentials are configured), per RFC 1928.
 - **Handshake reads are bounded, not timed.** The CONNECT response head is capped at 64 KiB; wall-clock timeouts are the injected transport's concern (`readTimeoutMs` in `@browsercore/transport`).
 
+
+## Contributing
+
+Contributions are welcome — bug reports, reproductions, docs and code alike. Start with [CONTRIBUTING.md](CONTRIBUTING.md); the full guide lives in the [browsersmith repo](https://github.com/jverneuer/browsersmith/blob/main/CONTRIBUTING.md). First timer? Check the [`good first issue`](https://github.com/jverneuer/browsercore-proxy/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) label. Security issues: [SECURITY.md](SECURITY.md), never a public issue.
+
 ## License
 
 MIT
