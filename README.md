@@ -1,9 +1,7 @@
 # @browsercore/proxy
 
 [![npm version](https://img.shields.io/npm/v/@browsercore/proxy)](https://www.npmjs.com/package/@browsercore/proxy)
-[![coverage](https://img.shields.io/endpoint?url=https://jverneuer.github.io/browsercore-proxy/badge.json)](https://jverneuer.github.io/browsercore-proxy/COVERAGE.md)
 [![CI](https://img.shields.io/github/actions/workflow/status/jverneuer/browsercore-proxy/ci.yml?label=ci)](https://github.com/jverneuer/browsercore-proxy/actions/workflows/ci.yml)
-[![license](https://img.shields.io/npm/l/@browsercore/proxy.svg)](LICENSE)
 
 @browsercore/proxy establishes tunneled connections through HTTP (CONNECT) and SOCKS5 proxies. It knows nothing about TLS, HTTP framing, or browser fingerprinting, it takes an open duplex `Transport` (from `@browsercore/contracts`), performs the proxy handshake on it, and hands the same stream back tunneled, ready for the next layer (e.g. `@browsercore/tls`).
 
