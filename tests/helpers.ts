@@ -28,15 +28,25 @@ import type {
 
 type Listener = (...args: unknown[]) => void;
 
+/**
+ * A registry entry: `original` is the caller-supplied listener (the identity
+ * `off`/`removeListener` match against), `call` is what dispatches — the
+ * caller's listener for `on`, a self-retiring wrapper for `once`.
+ */
+interface RegisteredListener {
+    readonly original: Listener;
+    readonly call: Listener;
+}
+
 /** A synthetic duplex byte-stream transport. */
 export class MemoryTransport implements Transport {
     public readonly id: string;
-    public stateValue: TransportState = { state: "open", bytesTransferred: 0 };
+    public stateValue: TransportState = { state: "open" };
     /** Bytes this side wrote, as a log for assertions. */
     public readonly writes: Uint8Array[] = [];
 
     private readonly incoming: Uint8Array[] = [];
-    private readonly listeners = new Map<string, Set<Listener>>();
+    private readonly listeners = new Map<string, Set<RegisteredListener>>();
     private peerRef: MemoryTransport | undefined;
     private pendingRead: ((data: Uint8Array) => void) | undefined;
     private pendingReadReject: ((error: Error) => void) | undefined;
@@ -116,29 +126,66 @@ export class MemoryTransport implements Transport {
     }
 
     public on(event: string, listener: Listener): void {
-        this.register(event, listener);
+        this.register(event, { original: listener, call: listener });
     }
 
     public once(event: string, listener: Listener): void {
-        const wrapped: Listener = (...args) => {
-            this.listeners.get(event)?.delete(wrapped);
-            listener(...args);
+        const entry: RegisteredListener = {
+            original: listener,
+            call: (...args) => {
+                this.listeners.get(event)?.delete(entry);
+                listener(...args);
+            },
         };
-        this.register(event, wrapped);
+        this.register(event, entry);
     }
 
-    /** Test seam: notify event subscribers. */
-    public emitTest(event: string, ...args: unknown[]): void {
-        for (const listener of [...(this.listeners.get(event) ?? [])]) {
-            listener(...args);
+    public off(event: string, listener: Listener): void {
+        this.unregister(event, listener);
+    }
+
+    public removeListener(event: string, listener: Listener): void {
+        this.unregister(event, listener);
+    }
+
+    public emit(event: string, ...args: unknown[]): boolean {
+        return this.emitTest(event, ...args);
+    }
+
+    public listenerCount(event: string): number {
+        return this.listeners.get(event)?.size ?? 0;
+    }
+
+    public removeAllListeners(event?: string): void {
+        if (event === undefined) {
+            this.listeners.clear();
+            return;
         }
+        this.listeners.delete(event);
     }
 
-    private register(event: string, listener: Listener): void {
+    /** Test seam: notify event subscribers; returns whether any were registered. */
+    public emitTest(event: string, ...args: unknown[]): boolean {
+        const registered = [...(this.listeners.get(event) ?? [])];
+        for (const listener of registered) {
+            listener.call(...args);
+        }
+        return registered.length > 0;
+    }
+
+    private register(event: string, entry: RegisteredListener): void {
         if (!this.listeners.has(event)) {
             this.listeners.set(event, new Set());
         }
-        this.listeners.get(event)?.add(listener);
+        this.listeners.get(event)?.add(entry);
+    }
+
+    private unregister(event: string, listener: Listener): void {
+        for (const entry of [...(this.listeners.get(event) ?? [])]) {
+            if (entry.original === listener) {
+                this.listeners.get(event)?.delete(entry);
+            }
+        }
     }
 }
 

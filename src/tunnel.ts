@@ -10,6 +10,9 @@
 
 import type { CloseReason, Transport, TransportState } from "@browsercore/contracts";
 
+/** Listener shape of the canonical {@link Transport} event surface. */
+type Listener = (...args: unknown[]) => void;
+
 /**
  * Return the transport to use for tunnel data after a handshake.
  *
@@ -62,19 +65,34 @@ class ReplayingTransport implements Transport {
         return this.underlying.close(reason);
     }
 
-    public on(event: "data", listener: (data: Uint8Array) => void): void;
-    public on(event: "close", listener: (reason: CloseReason) => void): void;
-    public on(event: "error", listener: (error: Error) => void): void;
-    public on(event: string, listener: (...args: never[]) => void): void {
-        // The replay only affects the pull side; event subscribers see the
-        // underlying transport's stream unchanged, so delegation is exact.
-        this.underlying.on(event as "data", listener as (data: Uint8Array) => void);
+    // The replay only affects the pull side; event subscribers see the
+    // underlying transport's stream unchanged, so delegation is exact for
+    // the entire canonical event surface.
+    public on(event: string, listener: Listener): void {
+        this.underlying.on(event, listener);
     }
 
-    public once(event: "data", listener: (data: Uint8Array) => void): void;
-    public once(event: "close", listener: (reason: CloseReason) => void): void;
-    public once(event: "error", listener: (error: Error) => void): void;
-    public once(event: string, listener: (...args: never[]) => void): void {
-        this.underlying.once(event as "data", listener as (data: Uint8Array) => void);
+    public once(event: string, listener: Listener): void {
+        this.underlying.once(event, listener);
+    }
+
+    public off(event: string, listener: Listener): void {
+        this.underlying.off(event, listener);
+    }
+
+    public removeListener(event: string, listener: Listener): void {
+        this.underlying.removeListener(event, listener);
+    }
+
+    public emit(event: string, ...args: unknown[]): boolean {
+        return this.underlying.emit(event, ...args);
+    }
+
+    public listenerCount(event: string): number {
+        return this.underlying.listenerCount(event);
+    }
+
+    public removeAllListeners(event?: string): void {
+        this.underlying.removeAllListeners(event);
     }
 }

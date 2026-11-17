@@ -12,6 +12,9 @@
 import type { CloseReason, Socket, Transport, TransportState } from "@browsercore/contracts";
 import { ProxyError } from "./errors.js";
 
+/** Listener shape of the canonical {@link Transport} event surface. */
+type Listener = (...args: unknown[]) => void;
+
 let nextTransportId = 0;
 
 /**
@@ -28,15 +31,19 @@ export function createSocketTransport(socket: Socket): Transport {
 class SocketTransport implements Transport {
     public readonly id: string;
 
-    private stateValue: TransportState = { state: "open", bytesTransferred: 0 };
+    private stateValue: TransportState = { state: "open" };
     private readonly socket: Socket;
     private readonly readQueue: Uint8Array[] = [];
     /**
-     * One-shot `"data"` subscribers. The Socket contract has `once` only for
-     * connect/close/error and no listener removal, so one-shot data
-     * subscriptions are dispatched and retired here instead.
+     * Local listener registry backing the canonical `Transport` event surface.
+     * The Socket contract offers only literal-event `on`/`once` and no removal,
+     * so `off`/`removeListener`/`emit`/`listenerCount`/`removeAllListeners`
+     * cannot be delegated to it. Instead the adapter's own socket wiring
+     * (below) translates the three Transport events into this registry, which
+     * implements the full surface.
      */
-    private readonly onceDataListeners = new Set<(data: Uint8Array) => void>();
+    private readonly listeners = new Map<string, Set<Listener>>();
+    private readonly onceListeners = new Map<string, Set<Listener>>();
     private pendingRead: ((data: Uint8Array) => void) | undefined;
     private pendingReadReject: ((error: Error) => void) | undefined;
 
@@ -49,9 +56,9 @@ class SocketTransport implements Transport {
         socket.on("error", (error) => {
             this.onSocketError(error);
         });
-        // `on("close")` (not `once`) because the Socket contract's
-        // `once("close")` listener takes no hadError argument; the persistent
-        // listener is harmless — the handler is idempotent once closed.
+        // `on("close")` (not `once`) because the adapter must observe every
+        // close-shaped event to keep registry subscribers in sync; the
+        // handler is idempotent once closed.
         socket.on("close", (hadError: boolean) => {
             this.onSocketClose(hadError);
         });
@@ -71,7 +78,6 @@ class SocketTransport implements Transport {
                     reject(new ProxyError(`Write failed on transport ${this.id}`, { id: this.id }, { cause: err }));
                     return;
                 }
-                this.recordTransfer(data.length);
                 resolve();
             });
         });
@@ -102,72 +108,83 @@ class SocketTransport implements Transport {
         return Promise.resolve();
     }
 
-    public on(event: "data", listener: (data: Uint8Array) => void): void;
-    public on(event: "close", listener: (reason: CloseReason) => void): void;
-    public on(event: "error", listener: (error: Error) => void): void;
-    public on(event: string, listener: (...args: never[]) => void): void {
-        this.subscribe("on", event, listener as (data: unknown) => void);
+    public on(event: string, listener: Listener): void {
+        this.register(this.listeners, event, listener);
     }
 
-    public once(event: "data", listener: (data: Uint8Array) => void): void;
-    public once(event: "close", listener: (reason: CloseReason) => void): void;
-    public once(event: "error", listener: (error: Error) => void): void;
-    public once(event: string, listener: (...args: never[]) => void): void {
-        this.subscribe("once", event, listener as (data: unknown) => void);
+    public once(event: string, listener: Listener): void {
+        this.register(this.onceListeners, event, listener);
     }
 
-    private subscribe(
-        method: "on" | "once",
-        event: string,
-        listener: (data: unknown) => void,
-    ): void {
-        if (event === "close") {
-            // Translate the socket's boolean hadError into the transport's
-            // CloseReason union. `once("close")` loses hadError in the Socket
-            // contract (its listener takes no args), so it assumes the benign
-            // case — good enough for advisory subscribers.
-            const adapted = (hadError: boolean): void => {
-                listener(hadError
-                    ? { kind: "error", error: new Error("socket closed after error") }
-                    : { kind: "remote_close" });
-            };
-            if (method === "on") {
-                this.socket.on("close", adapted);
-            } else {
-                this.socket.once("close", () => {
-                    adapted(false);
-                });
-            }
+    public off(event: string, listener: Listener): void {
+        this.unregister(event, listener);
+    }
+
+    public removeListener(event: string, listener: Listener): void {
+        this.unregister(event, listener);
+    }
+
+    public emit(event: string, ...args: unknown[]): boolean {
+        return this.notify(event, ...args);
+    }
+
+    public listenerCount(event: string): number {
+        return (this.listeners.get(event)?.size ?? 0) + (this.onceListeners.get(event)?.size ?? 0);
+    }
+
+    public removeAllListeners(event?: string): void {
+        if (event === undefined) {
+            this.listeners.clear();
+            this.onceListeners.clear();
             return;
         }
-        if (event === "data") {
-            if (method === "once") {
-                this.onceDataListeners.add(listener as (data: Uint8Array) => void);
-            } else {
-                this.socket.on("data", listener as (data: Uint8Array) => void);
-            }
+        this.listeners.delete(event);
+        this.onceListeners.delete(event);
+    }
+
+    private register(registry: Map<string, Set<Listener>>, event: string, listener: Listener): void {
+        const existing = registry.get(event);
+        if (existing !== undefined) {
+            existing.add(listener);
             return;
         }
-        if (event === "error") {
-            const errorListener = listener as (error: Error) => void;
-            if (method === "on") {
-                this.socket.on("error", errorListener);
-            } else {
-                this.socket.once("error", errorListener);
+        registry.set(event, new Set([listener]));
+    }
+
+    private unregister(event: string, listener: Listener): void {
+        this.listeners.get(event)?.delete(listener);
+        this.onceListeners.get(event)?.delete(listener);
+    }
+
+    /**
+     * Dispatch an event to the registry: one-shot listeners first (retiring
+     * each before it runs, so a throwing listener is still one-shot), then
+     * persistent listeners over a snapshot — a listener unsubscribing itself
+     * mid-dispatch must not change who else sees the event.
+     *
+     * Returns whether any listener was registered, per the EventProvider
+     * `emit` contract.
+     */
+    private notify(event: string, ...args: unknown[]): boolean {
+        const oneShot = this.onceListeners.get(event);
+        let delivered = oneShot !== undefined && oneShot.size > 0;
+        if (oneShot !== undefined) {
+            for (const listener of oneShot) {
+                oneShot.delete(listener);
+                listener(...args);
             }
+            this.onceListeners.delete(event);
         }
+        const persistent = this.listeners.get(event);
+        delivered = delivered || (persistent !== undefined && persistent.size > 0);
+        for (const listener of Array.from(persistent ?? [])) {
+            listener(...args);
+        }
+        return delivered;
     }
 
     private onSocketData(chunk: Uint8Array): void {
-        this.recordTransfer(chunk.length);
-
-        // One-shot subscribers retire after their first dispatch. Deleting the
-        // current entry mid-iteration is defined Set behavior, so the loop can
-        // iterate the set directly.
-        for (const listener of this.onceDataListeners) {
-            this.onceDataListeners.delete(listener);
-            listener(chunk);
-        }
+        this.notify("data", chunk);
 
         const pending = this.pendingRead;
         if (pending !== undefined) {
@@ -180,26 +197,31 @@ class SocketTransport implements Transport {
     }
 
     private onSocketError(error: Error): void {
-        if (this.stateValue.state === "closed") {
-            return; // a close always follows; state is already final
+        if (this.stateValue.state !== "closed") {
+            this.stateValue = { state: "closed", reason: { kind: "error", error } };
+            this.rejectPendingRead();
+            // Force teardown — relying on the peer to close after an error hangs readers.
+            this.socket.destroy();
         }
-        this.stateValue = { state: "closed", reason: { kind: "error", error } };
-        this.rejectPendingRead();
-        // Force teardown — relying on the peer to close after an error hangs readers.
-        this.socket.destroy();
+        // State is finalized before the dispatch so listeners observe the
+        // closed state; delivery happens even when it was already final,
+        // matching the socket's own every-listener-sees-every-event behavior.
+        this.notify("error", error);
     }
 
     private onSocketClose(hadError: boolean): void {
-        if (this.stateValue.state === "closed") {
-            return; // close() or onSocketError() already finalized the state
+        // Translate the socket's boolean hadError into the transport's
+        // CloseReason union once — both persistent and one-shot subscribers
+        // see the true reason (the former `once("close")` benign-case
+        // assumption died with the direct socket delegation).
+        const reason: CloseReason = hadError
+            ? { kind: "error", error: new Error("socket closed after error") }
+            : { kind: "remote_close" };
+        if (this.stateValue.state !== "closed") {
+            this.stateValue = { state: "closed", reason };
+            this.rejectPendingRead();
         }
-        this.stateValue = {
-            state: "closed",
-            reason: hadError
-                ? { kind: "error", error: new Error("socket closed after error") }
-                : { kind: "remote_close" },
-        };
-        this.rejectPendingRead();
+        this.notify("close", reason);
     }
 
     private rejectPendingRead(): void {
@@ -217,15 +239,5 @@ class SocketTransport implements Transport {
             `Cannot ${operation} — transport ${this.id} is closed (${reason})`,
             { id: this.id, operation, reason },
         );
-    }
-
-    /** Keep the state's byte counter current — observable via `state.bytesTransferred`. */
-    private recordTransfer(byteCount: number): void {
-        if (this.stateValue.state === "open") {
-            this.stateValue = {
-                state: "open",
-                bytesTransferred: this.stateValue.bytesTransferred + byteCount,
-            };
-        }
     }
 }

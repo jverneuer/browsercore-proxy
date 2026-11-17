@@ -10,13 +10,13 @@ import { createSocketTransport } from "../src/socket-transport.js";
 import { FakeSocket, bytes, rejectionOf } from "./helpers.js";
 
 describe("createSocketTransport", () => {
-    it("resolves writes from the socket callback and records transferred bytes", async () => {
+    it("resolves writes from the socket callback and stays open", async () => {
         const socket = new FakeSocket();
         const transport = createSocketTransport(socket);
 
         await transport.write(bytes("hello"));
         expect(socket.written).toEqual([bytes("hello")]);
-        expect(transport.state).toEqual({ state: "open", bytesTransferred: 5 });
+        expect(transport.state).toEqual({ state: "open" });
     });
 
     it("rejects a write whose socket callback reports an error, with cause", async () => {
@@ -128,7 +128,7 @@ describe("createSocketTransport", () => {
         expect(transport.state).toEqual({ state: "closed", reason: { kind: "client_close" } });
     });
 
-    it("ignores data arriving after close (byte counter frozen)", () => {
+    it("ignores data arriving after close (state stays final)", () => {
         const socket = new FakeSocket();
         const transport = createSocketTransport(socket);
         socket.emitCustom("close", false);
@@ -169,8 +169,44 @@ describe("createSocketTransport", () => {
         socket.emitCustom("close", true);
         socket.emitCustom("close", false);
 
-        // One-shot listeners dispatch first; `once("close")` cannot see
-        // hadError through the Socket contract, so it reports the benign case.
-        expect(reasons).toEqual(["once:remote_close", "on:error", "on:remote_close"]);
+        // One-shot listeners dispatch first and, like persistent ones, see
+        // the true translated reason — close-after-error is an error.
+        expect(reasons).toEqual(["once:error", "on:error", "on:remote_close"]);
+    });
+
+    it("serves the full canonical event surface: emit, off, counts, removeAllListeners", () => {
+        const socket = new FakeSocket();
+        const transport = createSocketTransport(socket);
+
+        const seen: unknown[] = [];
+        const first = (): void => seen.push("first");
+        const second = (): void => seen.push("second");
+        transport.on("custom", first);
+        transport.on("custom", second);
+
+        expect(transport.listenerCount("custom")).toBe(2);
+        expect(transport.emit("custom")).toBe(true);
+        expect(seen).toEqual(["first", "second"]);
+
+        transport.off("custom", first);
+        expect(transport.listenerCount("custom")).toBe(1);
+
+        transport.removeListener("custom", second);
+        expect(transport.listenerCount("custom")).toBe(0);
+        expect(transport.emit("custom")).toBe(false);
+
+        // Removal also covers one-shot registrations before they fire.
+        const never: () => void = () => seen.push("never");
+        transport.once("data", never);
+        transport.removeAllListeners("data");
+        socket.pushData(bytes("x"));
+        expect(seen).toEqual(["first", "second"]);
+
+        // Untargeted removeAllListeners() clears every event at once.
+        transport.on("data", never);
+        transport.on("close", never);
+        transport.removeAllListeners();
+        expect(transport.listenerCount("data")).toBe(0);
+        expect(transport.listenerCount("close")).toBe(0);
     });
 });
