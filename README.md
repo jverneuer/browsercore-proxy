@@ -88,6 +88,8 @@ node:net / node:dns         (injected via Platform.network — never imported)
 
 The HTTP CONNECT codec is internal on purpose: importing `@browsercore/http1` would be an upward dependency edge (http1 sits above transport in the layer graph) for what is a twelve-line request.
 
+**Canonical config types (0.1.4).** `ProxyScheme`, `ProxyConfig`, `ProxyTarget`, and `ProxyCredentials` are no longer declared in this package — `@browsercore/contracts` 0.2.6 (`src/config.ts`) is their canonical home, and `@browsercore/proxy` re-exports the canonical definitions verbatim (the same rename-free adoption pattern `@browsercore/transport` 0.2.9 used for `Transport`). The public API is unchanged: same names, same shapes, now guaranteed drift-free against every other consumer of the config vocabulary. The Zod schemas in `src/schemas.ts` remain proxy-local — validation is this package's job, and the schemas validate external data INTO the canonical type.
+
 ## Position in BrowserCore
 
 ```
