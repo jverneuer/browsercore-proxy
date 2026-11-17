@@ -51,4 +51,34 @@ describe("tunnelTransport", () => {
 
         expect(seen).toEqual([["on", bytes("d")], ["once", boom]]);
     });
+
+    it("delegates the full canonical event surface to the underlying transport", () => {
+        const transport = new MemoryTransport("t");
+        const tunneled = tunnelTransport(transport, bytes("X"));
+
+        const seen: unknown[] = [];
+        const listener = (): void => seen.push("hit");
+        tunneled.on("custom", listener);
+
+        expect(tunneled.listenerCount("custom")).toBe(1);
+        expect(tunneled.emit("custom")).toBe(true);
+        expect(seen).toEqual(["hit"]);
+
+        tunneled.off("custom", listener);
+        expect(tunneled.listenerCount("custom")).toBe(0);
+        expect(tunneled.emit("custom")).toBe(false);
+
+        tunneled.on("custom", listener);
+        tunneled.once("custom", listener);
+        tunneled.removeListener("custom", listener);
+        expect(tunneled.listenerCount("custom")).toBe(0);
+
+        tunneled.on("custom", listener);
+        tunneled.removeAllListeners("custom");
+        expect(tunneled.listenerCount("custom")).toBe(0);
+
+        tunneled.on("custom", listener);
+        tunneled.removeAllListeners();
+        expect(transport.listenerCount("custom")).toBe(0);
+    });
 });
