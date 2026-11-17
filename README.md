@@ -78,6 +78,25 @@ The two SOCKS schemes differ only in **who resolves the target hostname**:
 
 `connectViaProxy` encodes this distinction: `socks5` requires `platform.network.dns` and resolves first; `socks5h` never touches DNS. IP-literal targets skip resolution under both schemes.
 
+## Public API
+
+| Export | Kind | Purpose |
+| --- | --- | --- |
+| `connectViaProxy()` | function | Dial the proxy via the injected `Platform` and establish the right tunnel per scheme |
+| `establishSocks5Tunnel()` | function | RFC 1928/1929 handshake over an open `Transport` (method negotiation, user/pass auth, CONNECT) |
+| `establishHttpConnectTunnel()` | function | HTTP CONNECT handshake over an open `Transport` (optional Basic auth) |
+| `parseProxyUrl()` | function | Parse + Zod-validate `http://`, `socks5://`, `socks5h://` URLs into a `ProxyConfig` |
+| `ProxyScheme` | type alias | `"http" \| "socks5" \| "socks5h"` |
+| `ProxyConfig` | interface | Scheme, host, port, optional credentials (immutable) |
+| `ProxyTarget` | interface | Destination host/port requested through the proxy |
+| `ProxyCredentials` | interface | Username/password pair for SOCKS5 or Basic auth |
+| `Socks5TunnelOptions` | interface | `atyp` override: `"domain" \| "ipv4" \| "ipv6" \| "auto"` (default `auto`) |
+| `ProxyError` | class | Base typed error (`kind` + `details` + `cause`) — match on `kind`, not messages |
+| `ProxyConfigError` | class | Invalid URL, unsupported scheme, or credentials that cannot be encoded on the wire |
+| `ProxyAuthError` | class | SOCKS method 0xFF / RFC 1929 failure / HTTP 407 (carries `challenge`) |
+| `ProxyTunnelError` | class | SOCKS reply codes 1–8 (RFC 1928 meanings) / HTTP CONNECT non-2xx (carries `code`, `meaning`) |
+| `ProxyHandshakeError` | class | Malformed peer bytes, wrong versions, truncated replies |
+
 ## Package Dependencies
 
 ```
@@ -109,25 +128,6 @@ Application
       │
      IP
 ```
-
-## Public API
-
-| Export | Kind | Purpose |
-| --- | --- | --- |
-| `connectViaProxy()` | function | Dial the proxy via the injected `Platform` and establish the right tunnel per scheme |
-| `establishSocks5Tunnel()` | function | RFC 1928/1929 handshake over an open `Transport` (method negotiation, user/pass auth, CONNECT) |
-| `establishHttpConnectTunnel()` | function | HTTP CONNECT handshake over an open `Transport` (optional Basic auth) |
-| `parseProxyUrl()` | function | Parse + Zod-validate `http://`, `socks5://`, `socks5h://` URLs into a `ProxyConfig` |
-| `ProxyScheme` | type alias | `"http" \| "socks5" \| "socks5h"` |
-| `ProxyConfig` | interface | Scheme, host, port, optional credentials (immutable) |
-| `ProxyTarget` | interface | Destination host/port requested through the proxy |
-| `ProxyCredentials` | interface | Username/password pair for SOCKS5 or Basic auth |
-| `Socks5TunnelOptions` | interface | `atyp` override: `"domain" \| "ipv4" \| "ipv6" \| "auto"` (default `auto`) |
-| `ProxyError` | class | Base typed error (`kind` + `details` + `cause`) — match on `kind`, not messages |
-| `ProxyConfigError` | class | Invalid URL, unsupported scheme, or credentials that cannot be encoded on the wire |
-| `ProxyAuthError` | class | SOCKS method 0xFF / RFC 1929 failure / HTTP 407 (carries `challenge`) |
-| `ProxyTunnelError` | class | SOCKS reply codes 1–8 (RFC 1928 meanings) / HTTP CONNECT non-2xx (carries `code`, `meaning`) |
-| `ProxyHandshakeError` | class | Malformed peer bytes, wrong versions, truncated replies |
 
 ## Limitations & future work
 
