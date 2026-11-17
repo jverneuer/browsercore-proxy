@@ -57,7 +57,9 @@ describe("tunnelTransport", () => {
         const tunneled = tunnelTransport(transport, bytes("X"));
 
         const seen: unknown[] = [];
-        const listener = (): void => seen.push("hit");
+        const listener = (): void => {
+            seen.push("hit");
+        };
         tunneled.on("custom", listener);
 
         expect(tunneled.listenerCount("custom")).toBe(1);
