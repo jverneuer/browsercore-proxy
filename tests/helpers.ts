@@ -15,8 +15,9 @@ import type {
     CloseReason,
     CompressionProvider,
     Crypto,
-    DatagramTransport,
+    DnsResolver,
     EventProvider,
+    Net,
     Network,
     Platform,
     Socket,
@@ -24,9 +25,35 @@ import type {
     Time,
     Transport,
     TransportState,
+    UdpSocketFactory,
 } from "@browsercore/contracts";
 
 type Listener = (...args: unknown[]) => void;
+
+/**
+ * The Socket contract's per-literal listener shapes. The `on`/`once` overload
+ * sets below accept exactly these; the implementation signatures take the
+ * union so each overload is compatible with them under strictFunctionTypes
+ * (a broad `(...args: unknown[]) => void` parameter is NOT a supertype of
+ * `(err: Error) => void`-shaped listeners).
+ */
+type SocketListener =
+    | (() => void)
+    | ((err: Error) => void)
+    | ((chunk: Uint8Array) => void)
+    | ((hadError: boolean) => void);
+
+/**
+ * Heterogeneous-dispatch bridge: the registries store broad `Listener`
+ * entries, but the contract's listeners are typed per event literal. TS has
+ * no assertion-free way to invoke an arbitrary parameter list with an
+ * `unknown[]` spread; the arg lists are constructed by this fixture's emit
+ * seams to match the event name, so the bottom-args assertion is contained
+ * to this one adapter.
+ */
+function adaptListener(listener: SocketListener): Listener {
+    return (...args: unknown[]) => (listener as (...args: unknown[]) => void)(...args);
+}
 
 /**
  * A registry entry: `original` is the caller-supplied listener (the identity
@@ -240,22 +267,22 @@ export class FakeSocket implements Socket {
 
     public once(event: "connect" | "close", listener: () => void): void;
     public once(event: "error", listener: (err: Error) => void): void;
-    public once(event: string, listener: Listener): void {
+    public once(event: string, listener: SocketListener): void {
         if (!this.onceListeners.has(event)) {
             this.onceListeners.set(event, new Set());
         }
-        this.onceListeners.get(event)?.add(listener);
+        this.onceListeners.get(event)?.add(adaptListener(listener));
     }
 
     public on(event: "data", listener: (chunk: Uint8Array) => void): void;
     public on(event: "drain" | "end", listener: () => void): void;
     public on(event: "error", listener: (err: Error) => void): void;
     public on(event: "close", listener: (hadError: boolean) => void): void;
-    public on(event: string, listener: Listener): void {
+    public on(event: string, listener: SocketListener): void {
         if (!this.listeners.has(event)) {
             this.listeners.set(event, new Set());
         }
-        this.listeners.get(event)?.add(listener);
+        this.listeners.get(event)?.add(adaptListener(listener));
     }
 
     /** Test seam: deliver bytes as if they arrived from the network. */
@@ -292,16 +319,18 @@ export function testPlatform(network: Network): Platform {
 }
 
 /** A Network whose UDP slot is inert — the proxy code never sends datagrams. */
-export function testNetwork(tcp: Network["tcp"], dns?: Network["dns"]): Network {
+export function testNetwork(tcp: Net, dns?: DnsResolver): Network {
     return {
         tcp,
-        dns: dns ?? unused<Network["dns"]>("network.dns"),
-        udp: unused<DatagramTransport>("network.udp"),
+        dns: dns ?? unused<DnsResolver>("network.dns"),
+        // `udp` is a factory since contracts 0.2.6 (per-connection sockets);
+        // the inert-throwing stub only needs to satisfy that shape.
+        udp: unused<UdpSocketFactory>("network.udp"),
     };
 }
 
 /** A DnsResolver stub returning one fixed address (records every lookup). */
-export function scriptedDns(address = "203.0.113.7"): Network["dns"] & { calls: string[] } {
+export function scriptedDns(address = "203.0.113.7"): DnsResolver & { calls: string[] } {
     const dns = {
         calls: [] as string[],
         lookup(hostname: string, family: 4 | 6): Promise<{ address: string; family: 4 | 6 }[]> {
@@ -313,7 +342,7 @@ export function scriptedDns(address = "203.0.113.7"): Network["dns"] & { calls: 
 }
 
 /** A DnsResolver stub returning an empty address list. */
-export const emptyDns: Network["dns"] = {
+export const emptyDns: DnsResolver = {
     lookup(): Promise<{ address: string; family: 4 | 6 }[]> {
         return Promise.resolve([]);
     },
@@ -364,4 +393,26 @@ export async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
         return e;
     }
     throw new Error("expected the promise to reject, but it resolved");
+}
+
+/**
+ * Type guard for a `"close"` event payload on the canonical EventProvider
+ * surface — listeners receive `unknown` args (the broad registry shape the
+ * Transport contract deliberately exposes), so subscribers narrow before
+ * reading `.kind`.
+ */
+function isCloseReason(payload: unknown): payload is CloseReason {
+    return typeof payload === "object" && payload !== null && "kind" in payload &&
+        typeof payload.kind === "string";
+}
+
+/**
+ * Read the `.kind` of a `"close"` event payload, failing loudly on any other
+ * shape instead of silently dropping the assertion input.
+ */
+export function closeKindOf(payload: unknown): CloseReason["kind"] {
+    if (!isCloseReason(payload)) {
+        throw new Error(`not a CloseReason payload: ${String(payload)}`);
+    }
+    return payload.kind;
 }

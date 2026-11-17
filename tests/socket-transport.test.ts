@@ -7,7 +7,7 @@
 import { describe, expect, it } from "vitest";
 import { ProxyError } from "../src/index.js";
 import { createSocketTransport } from "../src/socket-transport.js";
-import { FakeSocket, bytes, rejectionOf } from "./helpers.js";
+import { FakeSocket, bytes, closeKindOf, rejectionOf } from "./helpers.js";
 
 describe("createSocketTransport", () => {
     it("resolves writes from the socket callback and stays open", async () => {
@@ -109,7 +109,7 @@ describe("createSocketTransport", () => {
         const transport = createSocketTransport(socket);
         let closeSeen: string | undefined;
         transport.on("close", (reason) => {
-            closeSeen = reason.kind;
+            closeSeen = closeKindOf(reason);
         });
 
         await transport.close();
@@ -163,8 +163,8 @@ describe("createSocketTransport", () => {
         const transport = createSocketTransport(socket);
 
         const reasons: string[] = [];
-        transport.on("close", (reason) => reasons.push(`on:${reason.kind}`));
-        transport.once("close", (reason) => reasons.push(`once:${reason.kind}`));
+        transport.on("close", (reason) => reasons.push(`on:${closeKindOf(reason)}`));
+        transport.once("close", (reason) => reasons.push(`once:${closeKindOf(reason)}`));
 
         socket.emitCustom("close", true);
         socket.emitCustom("close", false);
@@ -179,8 +179,12 @@ describe("createSocketTransport", () => {
         const transport = createSocketTransport(socket);
 
         const seen: unknown[] = [];
-        const first = (): void => seen.push("first");
-        const second = (): void => seen.push("second");
+        const first = (): void => {
+            seen.push("first");
+        };
+        const second = (): void => {
+            seen.push("second");
+        };
         transport.on("custom", first);
         transport.on("custom", second);
 
